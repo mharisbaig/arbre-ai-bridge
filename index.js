@@ -189,8 +189,13 @@ const server = http.createServer(async (req, res) => {
   if (urlPath === '/twiml/incoming' || urlPath === '/twilioVoiceCall') {
     const host = req.headers.host || 'arbre-ai-bridge.onrender.com';
     const streamUrl = `wss://${host}/media`;
+    const recordingCallbackUrl = `https://${host}/twiml/recording-status`;
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Start>
+    <Recording channels="dual" recordingStatusCallback="${recordingCallbackUrl}" />
+  </Start>
   <Say voice="Polly.Joanna">Welcome to Arbre IT Solutions. Connecting your call to our AI voice assistant stream.</Say>
   <Connect>
     <Stream url="${streamUrl}">
@@ -201,6 +206,27 @@ const server = http.createServer(async (req, res) => {
 
     res.writeHead(200, { 'Content-Type': 'text/xml' });
     res.end(twiml);
+    return;
+  }
+
+  // 2b. Recording Status Callback
+  if (urlPath === '/twiml/recording-status' && req.method === 'POST') {
+    let bodyText = '';
+    req.on('data', chunk => { bodyText += chunk; });
+    req.on('end', () => {
+      try {
+        const params = new URLSearchParams(bodyText);
+        const recordingUrl = params.get('RecordingUrl');
+        const recordingSid = params.get('RecordingSid');
+        const callSid = params.get('CallSid');
+        const duration = params.get('RecordingDuration');
+        console.log(`[ArbreBridge] 🎙️ CALL RECORDING SAVED! Call: ${callSid}, Recording: ${recordingSid}, Duration: ${duration}s, URL: ${recordingUrl}.mp3`);
+      } catch (err) {
+        console.error('[ArbreBridge] Recording callback parse error:', err.message);
+      }
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end('<Response/>');
+    });
     return;
   }
 
@@ -226,6 +252,7 @@ const server = http.createServer(async (req, res) => {
         const twilioNumber = process.env.TWILIO_PHONE_NUMBER || '+16056277176';
         const host = req.headers.host || 'arbre-ai-bridge.onrender.com';
         const streamUrl = `wss://${host}/media`;
+        const recordingCallbackUrl = `https://${host}/twiml/recording-status`;
 
         if (!accountSid || !authToken) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -238,6 +265,9 @@ const server = http.createServer(async (req, res) => {
 
         const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Start>
+    <Recording channels="dual" recordingStatusCallback="${recordingCallbackUrl}" />
+  </Start>
   <Say voice="Polly.Joanna">Hello ${customerName}. Connecting your call to Arbre IT Solutions AI voice assistant.</Say>
   <Connect>
     <Stream url="${streamUrl}">
