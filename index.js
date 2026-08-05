@@ -438,13 +438,16 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      const buffer = Buffer.from(await twilioRes.arrayBuffer());
       res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
-        'Cache-Control': 'public, max-age=3600'
+        'Content-Length': buffer.length,
+        'Accept-Ranges': 'bytes',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Cache-Control': 'public, max-age=86400'
       });
-
-      const arrayBuffer = await twilioRes.arrayBuffer();
-      res.end(Buffer.from(arrayBuffer));
+      res.end(buffer);
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, message: err.message }));
