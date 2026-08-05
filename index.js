@@ -362,6 +362,45 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 4. Fetch Live Call Recordings API (/api/recordings)
+  if (urlPath === '/api/recordings' && req.method === 'GET') {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+    if (!accountSid || !authToken) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: false,
+        message: 'TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be configured in Render environment variables.'
+      }));
+      return;
+    }
+
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+      const twilioRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings.json?PageSize=25`, {
+        headers: { 'Authorization': authHeader }
+      });
+
+      const data = await twilioRes.json();
+      const recordings = (data.recordings || []).map(r => ({
+        id: r.sid,
+        recordingSid: r.sid,
+        callSid: r.call_sid,
+        duration: (r.duration || '0') + 's',
+        dateCreated: r.date_created,
+        mediaUrl: `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${r.sid}.mp3`,
+      }));
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: recordings.length, recordings }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, message: err.message }));
+    }
+    return;
+  }
+
   res.writeHead(404);
   res.end('Not Found');
 });
