@@ -147,19 +147,136 @@ function downsample24to8kHz(buf) {
   return out;
 }
 
-// ─── HTTP Server (Health Check + WebSocket host) ──────────────────────────────
+// ─── HTTP Server (Health Check + TwiML Webhook + Outbound Call API) ──────────
 
-const server = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
+const server = http.createServer(async (req, res) => {
+  // Enable CORS headers for API requests
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  const urlPath = req.url ? req.url.split('?')[0] : '/';
+
+  // 1. Health Check
+  if (urlPath === '/health' || urlPath === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ok',
       service: 'arbre-ai-bridge',
       version: '1.0.0',
-      model: GEMINI_MODEL
+      model: GEMINI_MODEL,
+      hasTwilioConfig: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN)
     }));
     return;
   }
+
+  // 2. Twilio Incoming Voice Webhook (TwiML Generator)
+  if (urlPath === '/twiml/incoming' || urlPath === '/twilioVoiceCall') {
+    const host = req.headers.host || 'arbre-ai-bridge.onrender.com';
+    const streamUrl = `wss://${host}/media`;
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Welcome to Arbre IT Solutions. Connecting your call to our AI voice assistant stream.</Say>
+  <Connect>
+    <Stream url="${streamUrl}">
+      <Parameter name="company" value="Arbre IT Solutions" />
+    </Stream>
+  </Connect>
+</Response>`;
+
+    res.writeHead(200, { 'Content-Type': 'text/xml' });
+    res.end(twiml);
+    return;
+  }
+
+  // 3. Outbound Call Trigger API (/api/trigger-call)
+  if (urlPath === '/api/trigger-call' && req.method === 'POST') {
+    let bodyText = '';
+    req.on('data', chunk => { bodyText += chunk; });
+    req.on('end', async () => {
+      try {
+        const body = JSON.parse(bodyText || '{}');
+        const phoneNumber = (body.phoneNumber || '').trim();
+        const customerName = (body.customerName || 'Valued Customer').trim();
+        const topic = (body.topic || 'IT Support Inquiry').trim();
+
+        if (!phoneNumber) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: 'Phone number is required.' }));
+          return;
+        }
+
+        const accountSid = process.env.TWILIO_ACCOUNT_SID;
+        const authToken = process.env.TWILIO_AUTH_TOKEN;
+        const twilioNumber = process.env.TWILIO_PHONE_NUMBER || '+16056277176';
+        const host = req.headers.host || 'arbre-ai-bridge.onrender.com';
+        const streamUrl = `wss://${host}/media`;
+
+        if (!accountSid || !authToken) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: false,
+            message: 'Twilio credentials (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) not set in Render environment variables.'
+          }));
+          return;
+        }
+
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Hello ${customerName}. Connecting your call to Arbre IT Solutions AI voice assistant.</Say>
+  <Connect>
+    <Stream url="${streamUrl}">
+      <Parameter name="customerName" value="${customerName}" />
+      <Parameter name="topic" value="${topic}" />
+    </Stream>
+  </Connect>
+</Response>`;
+
+        const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+        const params = new URLSearchParams();
+        params.append('To', phoneNumber);
+        params.append('From', twilioNumber);
+        params.append('Twiml', twiml);
+
+        const twilioRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls.json`, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: params.toString(),
+        });
+
+        const responseData = await twilioRes.json();
+
+        if (twilioRes.ok && responseData.sid) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            callSid: responseData.sid,
+            message: `Outbound Twilio call placed successfully! Dialing ${phoneNumber}...`
+          }));
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: false,
+            message: responseData.message || 'Twilio API error placing outbound call.'
+          }));
+        }
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: err.message }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404);
   res.end('Not Found');
 });
