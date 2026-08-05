@@ -20,4 +20,4 @@ services:
       - key: GEMINI_API_KEY
         sync: false         # Must be set manually in Render Dashboard
       - key: GEMINI_MODEL
-        value: gemini-live-2.5-flash-preview
+        value: gemini-2.0-flash-exp

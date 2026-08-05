@@ -20,7 +20,8 @@ config();
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-live-2.5-flash-preview';
+const rawModel = process.env.GEMINI_MODEL || '';
+const GEMINI_MODEL = (rawModel && !rawModel.includes('2.5')) ? rawModel : 'gemini-2.0-flash-exp';
 
 if (!GEMINI_API_KEY) {
   console.error('[ArbreBridge] FATAL: GEMINI_API_KEY environment variable is required.');
