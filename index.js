@@ -38,6 +38,44 @@ if (!GEMINI_API_KEY) {
   process.exit(1);
 }
 
+/**
+ * Hang up an active Twilio call programmatically via Twilio REST API.
+ */
+async function hangupTwilioCall(callSid) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+  if (!callSid || callSid === 'unknown' || !accountSid || !authToken) {
+    console.warn(`[ArbreBridge] Cannot hangup call Sid ${callSid} — Twilio credentials or callSid missing.`);
+    return;
+  }
+
+  try {
+    console.log(`[ArbreBridge] 🛑 Programmatically hanging up Twilio Call: ${callSid}`);
+    const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+    const params = new URLSearchParams();
+    params.append('Status', 'completed');
+
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${callSid}.json`, {
+      method: 'POST',
+      headers: {
+        'Authorization': authHeader,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+
+    if (res.ok) {
+      console.log(`[ArbreBridge] ✅ Twilio call ${callSid} successfully terminated.`);
+    } else {
+      const errText = await res.text();
+      console.error(`[ArbreBridge] Failed to hang up call ${callSid}:`, errText);
+    }
+  } catch (err) {
+    console.error('[ArbreBridge] Error in hangupTwilioCall:', err.message);
+  }
+}
+
 // ─── Arbre IT Solutions System Prompt ─────────────────────────────────────────
 
 const ARBRE_SYSTEM_PROMPT = `You are Arbre, a professional and helpful AI voice assistant for Arbre IT Solutions, 
@@ -59,7 +97,8 @@ Guidelines:
 - Business hours: Monday–Saturday, 9 AM – 7 PM PKT.
 - Address: G-17 Friends Shopping Mall, Korangi 5, Karachi, Pakistan.
 - Always offer to connect the caller with a human specialist (Haris Baig) if needed.
-- Speak naturally and clearly, as if on a real phone call.`;
+- Speak naturally and clearly, as if on a real phone call.
+- IMPORTANT CALL DROP RULE: When concluding the call or after saying goodbye (e.g. "Goodbye!", "Have a great day!", "Thank you for calling Arbre IT Solutions!"), end your message with "[GOODBYE]".`;
 
 // ─── Audio Codec Helpers (μ-law ↔ PCM) ───────────────────────────────────────
 
@@ -418,7 +457,17 @@ wss.on('connection', async (ws, req) => {
       }
 
       if (textParts.length > 0) {
-        console.log(`[ArbreBridge] 💬 Gemini text: "${textParts.join(' ')}"`);
+        const fullText = textParts.join(' ');
+        console.log(`[ArbreBridge] 💬 Gemini text: "${fullText}"`);
+
+        // Check if Gemini indicated goodbye or call completion
+        const lower = fullText.toLowerCase();
+        if (lower.includes('[goodbye]') || lower.includes('goodbye') || lower.includes('have a great day') || lower.includes('bye for now') || lower.includes('have a wonderful day')) {
+          console.log(`[ArbreBridge] 🏁 Call conclusion detected! Scheduling automatic Twilio call drop for ${callSid} in 3.5s...`);
+          setTimeout(() => {
+            hangupTwilioCall(callSid);
+          }, 3500);
+        }
       }
 
       if (audioParts.length > 0) {
