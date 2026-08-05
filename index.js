@@ -10,7 +10,7 @@
  */
 
 import { WebSocketServer } from 'ws';
-import { GoogleGenAI, Modality } from '@google/genai';
+import WebSocket from 'ws';
 import http from 'http';
 import { config } from 'dotenv';
 
@@ -21,22 +21,22 @@ config();
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Supported Live API models (current as of 2026 — 2.0-flash-exp has been retired)
+// Supported Live API models
 const VALID_LIVE_MODELS = [
-  'gemini-3.1-flash-live-preview',
   'gemini-2.5-flash-preview-native-audio-dialog',
+  'gemini-3.1-flash-live-preview',
   'gemini-2.0-flash-live-001',
-  'gemini-2.0-flash-exp',
 ];
 const _envModel = process.env.GEMINI_MODEL || '';
-const GEMINI_MODEL = VALID_LIVE_MODELS.includes(_envModel) ? _envModel : 'gemini-3.1-flash-live-preview';
+const GEMINI_MODEL = VALID_LIVE_MODELS.includes(_envModel) ? _envModel : 'gemini-2.5-flash-preview-native-audio-dialog';
+
+// Raw WebSocket endpoint — no SDK, no versioning issues
+const GEMINI_WS_BASE = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 
 if (!GEMINI_API_KEY) {
   console.error('[ArbreBridge] FATAL: GEMINI_API_KEY environment variable is required.');
   process.exit(1);
 }
-
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // ─── Arbre IT Solutions System Prompt ─────────────────────────────────────────
 
@@ -300,144 +300,132 @@ wss.on('connection', async (ws, req) => {
 
   let streamSid = null;
   let callSid = null;
-  let geminiSession = null;
+  let geminiWs = null;        // Raw WebSocket to Gemini
   let isGeminiReady = false;
   let hasSentGreeting = false;
 
-  // Helper to trigger Gemini greeting as soon as session and stream are ready
-  const triggerGreetingIfReady = () => {
-    if (!geminiSession || !isGeminiReady || hasSentGreeting || !streamSid) return;
-    hasSentGreeting = true;
-    console.log(`[ArbreBridge] 📢 Triggering initial Gemini AI greeting prompt (Call: ${callSid}, Stream: ${streamSid})`);
-    try {
-      geminiSession.sendClientContent({
-        turns: [{
-          role: 'user',
-          parts: [{
-            text: 'A customer has just connected to the phone call. Please speak out loud immediately to greet them warmly: "Hello! Thank you for calling Arbre IT Solutions. My name is Arbre, your AI assistant. How can I help you today?"'
-          }]
-        }],
-        turnComplete: true
-      });
-    } catch (e) {
-      console.warn('[ArbreBridge] Could not send greeting prompt:', e.message);
+  // ── Send raw JSON message to Gemini WebSocket ──────────────────────────────
+  const sendToGemini = (obj) => {
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.send(JSON.stringify(obj));
     }
   };
 
-  // ── Initialize Gemini Live Session ──────────────────────────────────────────
-  try {
-    geminiSession = await ai.live.connect({
-      model: GEMINI_MODEL,
-      callbacks: {
-        onopen: () => {
-          isGeminiReady = true;
-          console.log(`[ArbreBridge] ✅ Gemini Live session open (call: ${callSid})`);
-          triggerGreetingIfReady();
-        },
+  // ── Trigger greeting once stream + Gemini session are both ready ───────────
+  const triggerGreetingIfReady = () => {
+    if (!isGeminiReady || hasSentGreeting || !streamSid) return;
+    hasSentGreeting = true;
+    console.log(`[ArbreBridge] 📢 Sending greeting prompt to Gemini (Call: ${callSid})`);
+    sendToGemini({
+      clientContent: {
+        turns: [{
+          role: 'user',
+          parts: [{ text: 'A customer has just connected to the phone call. Greet them warmly and ask how you can help.' }]
+        }],
+        turnComplete: true
+      }
+    });
+  };
 
-        onmessage: async (message) => {
-          try {
-            console.log('[ArbreBridge] Gemini msg keys:', Object.keys(message || {}).join(', '));
+  // ── Open raw WebSocket to Gemini BidiGenerateContent ──────────────────────
+  const geminiUrl = `${GEMINI_WS_BASE}?key=${GEMINI_API_KEY}`;
+  geminiWs = new WebSocket(geminiUrl);
 
-            // Collect inlineData parts from all possible response structures
-            const audioParts = [];
-
-            // Structure 1: serverContent.modelTurn.parts
-            const parts = message.serverContent?.modelTurn?.parts || [];
-            for (const part of parts) {
-              if (part.inlineData?.data) audioParts.push(part.inlineData);
-            }
-
-            // Structure 2: candidates[0].content.parts
-            const candidates = message.candidates || [];
-            for (const candidate of candidates) {
-              for (const part of (candidate.content?.parts || [])) {
-                if (part.inlineData?.data) audioParts.push(part.inlineData);
-              }
-            }
-
-            // Structure 3: data field directly
-            if (message.data) {
-              audioParts.push({ data: message.data, mimeType: 'audio/pcm;rate=24000' });
-            }
-
-            if (audioParts.length > 0) {
-              console.log(`[ArbreBridge] Received ${audioParts.length} audio part(s) from Gemini`);
-            }
-
-            for (const inlineData of audioParts) {
-              const mimeType = inlineData.mimeType || '';
-              const rawPCM = Buffer.from(inlineData.data, 'base64');
-
-              let pcm8Buffer;
-              if (mimeType.includes('16000')) {
-                const outSamples = Math.floor(rawPCM.length / 4);
-                pcm8Buffer = Buffer.alloc(outSamples * 2);
-                for (let i = 0; i < outSamples; i++) {
-                  pcm8Buffer.writeInt16LE(rawPCM.readInt16LE(i * 4), i * 2);
-                }
-              } else {
-                // Default: assume 24kHz
-                pcm8Buffer = downsample24to8kHz(rawPCM);
-              }
-
-              const mulawBuffer = pcm16ToMulawBuffer(pcm8Buffer);
-
-              if (ws.readyState === ws.OPEN && streamSid) {
-                ws.send(JSON.stringify({
-                  event: 'media',
-                  streamSid,
-                  media: { payload: mulawBuffer.toString('base64') }
-                }));
-              }
-            }
-
-            if (message.serverContent?.turnComplete) {
-              console.log(`[ArbreBridge] Gemini turn complete (call: ${callSid})`);
-            }
-          } catch (err) {
-            console.error('[ArbreBridge] Error processing Gemini message:', err.message, err.stack);
+  geminiWs.on('open', () => {
+    console.log(`[ArbreBridge] ✅ Gemini WS open — sending setup (model: ${GEMINI_MODEL})`);
+    // Send setup message — must be first message
+    sendToGemini({
+      setup: {
+        model: `models/${GEMINI_MODEL}`,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }
           }
         },
-
-        onerror: (err) => {
-          console.error('[ArbreBridge] Gemini Live error:', err);
-        },
-
-        onclose: (event) => {
-          isGeminiReady = false;
-          console.log(`[ArbreBridge] Gemini session closed (code: ${event?.code})`);
-        },
-      },
-
-      config: {
-        responseModalities: [Modality.AUDIO],
         systemInstruction: {
           parts: [{ text: ARBRE_SYSTEM_PROMPT }]
-        },
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Aoede' }
-          }
         }
       }
     });
+  });
 
-    console.log('[ArbreBridge] Gemini Live session initialization started');
-  } catch (err) {
-    console.error('[ArbreBridge] FATAL: Failed to initialize Gemini Live session:', err.message);
-    ws.close(1011, 'Gemini initialization failed');
-    return;
-  }
+  geminiWs.on('message', (rawData) => {
+    try {
+      const msg = JSON.parse(rawData.toString());
+      const keys = Object.keys(msg).join(', ');
+      console.log(`[ArbreBridge] Gemini msg: ${keys}`);
 
-  // ── Handle Twilio Media Stream Messages ─────────────────────────────────────
+      // Setup complete — session is ready
+      if (msg.setupComplete !== undefined) {
+        isGeminiReady = true;
+        console.log('[ArbreBridge] ✅ Gemini setupComplete — session ready');
+        triggerGreetingIfReady();
+        return;
+      }
+
+      // Collect audio parts from all known response structures
+      const audioParts = [];
+
+      // Structure A: serverContent.modelTurn.parts
+      for (const part of (msg.serverContent?.modelTurn?.parts || [])) {
+        if (part.inlineData?.data) audioParts.push(part.inlineData);
+      }
+      // Structure B: candidates[0].content.parts
+      for (const cand of (msg.candidates || [])) {
+        for (const part of (cand.content?.parts || [])) {
+          if (part.inlineData?.data) audioParts.push(part.inlineData);
+        }
+      }
+
+      if (audioParts.length > 0) {
+        console.log(`[ArbreBridge] 🔊 ${audioParts.length} audio part(s) from Gemini → forwarding to Twilio`);
+      }
+
+      for (const inlineData of audioParts) {
+        const mimeType = inlineData.mimeType || '';
+        const rawPCM = Buffer.from(inlineData.data, 'base64');
+
+        const pcm8Buffer = mimeType.includes('16000')
+          ? (() => { const n = Math.floor(rawPCM.length / 4); const b = Buffer.alloc(n * 2); for (let i = 0; i < n; i++) b.writeInt16LE(rawPCM.readInt16LE(i * 4), i * 2); return b; })()
+          : downsample24to8kHz(rawPCM);
+
+        const mulawBuffer = pcm16ToMulawBuffer(pcm8Buffer);
+
+        if (ws.readyState === ws.OPEN && streamSid) {
+          ws.send(JSON.stringify({
+            event: 'media',
+            streamSid,
+            media: { payload: mulawBuffer.toString('base64') }
+          }));
+        }
+      }
+
+      if (msg.serverContent?.turnComplete) {
+        console.log('[ArbreBridge] Gemini turn complete');
+      }
+    } catch (err) {
+      console.error('[ArbreBridge] Error processing Gemini message:', err.message);
+    }
+  });
+
+  geminiWs.on('close', (code, reason) => {
+    isGeminiReady = false;
+    console.log(`[ArbreBridge] Gemini WS closed (code: ${code}, reason: ${reason?.toString() || 'none'})`);
+  });
+
+  geminiWs.on('error', (err) => {
+    console.error('[ArbreBridge] Gemini WS error:', err.message);
+  });
+
+  // ── Handle Twilio Media Stream Messages ───────────────────────────────────
   ws.on('message', async (rawMessage) => {
     try {
       const data = JSON.parse(rawMessage.toString());
 
       switch (data.event) {
         case 'connected':
-          console.log('[ArbreBridge] Twilio signaled: connected');
+          console.log('[ArbreBridge] Twilio: connected');
           break;
 
         case 'start':
@@ -447,33 +435,23 @@ wss.on('connection', async (ws, req) => {
           triggerGreetingIfReady();
           break;
 
-        case 'media':
-          if (!data.media?.payload || !geminiSession || !isGeminiReady) break;
-
-          try {
-            const mulawBuffer = Buffer.from(data.media.payload, 'base64');
-            const pcm8Buffer = mulawBufferToPCM16(mulawBuffer);
-            const pcm16Buffer = upsample8to16kHz(pcm8Buffer);
-
-            const base64Audio = pcm16Buffer.toString('base64');
-
-            // Correct API: sendRealtimeInput({ media: { mimeType, data } })
-            geminiSession.sendRealtimeInput({
-              media: {
-                mimeType: 'audio/pcm;rate=16000',
-                data: base64Audio
-              }
-            });
-          } catch (e) {
-            console.warn('[ArbreBridge] Error forwarding audio to Gemini:', e.message);
-          }
+        case 'media': {
+          if (!data.media?.payload || !isGeminiReady) break;
+          const mulawBuffer = Buffer.from(data.media.payload, 'base64');
+          const pcm8Buffer = mulawBufferToPCM16(mulawBuffer);
+          const pcm16Buffer = upsample8to16kHz(pcm8Buffer);
+          const base64Audio = pcm16Buffer.toString('base64');
+          sendToGemini({
+            realtimeInput: {
+              mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64Audio }]
+            }
+          });
           break;
+        }
 
         case 'stop':
           console.log(`[ArbreBridge] Stream stopped — SID: ${streamSid}`);
-          if (geminiSession) {
-            try { geminiSession.close(); } catch (_) {}
-          }
+          if (geminiWs && geminiWs.readyState === WebSocket.OPEN) geminiWs.close();
           break;
 
         default:
@@ -484,15 +462,13 @@ wss.on('connection', async (ws, req) => {
     }
   });
 
-  ws.on('close', (code, reason) => {
-    console.log(`[ArbreBridge] WebSocket closed (code: ${code}, stream: ${streamSid})`);
-    if (geminiSession) {
-      try { geminiSession.close(); } catch (_) {}
-    }
+  ws.on('close', (code) => {
+    console.log(`[ArbreBridge] Twilio WS closed (code: ${code}, stream: ${streamSid})`);
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) geminiWs.close();
   });
 
   ws.on('error', (err) => {
-    console.error(`[ArbreBridge] WebSocket error (stream: ${streamSid}):`, err.message);
+    console.error(`[ArbreBridge] Twilio WS error:`, err.message);
   });
 });
 
