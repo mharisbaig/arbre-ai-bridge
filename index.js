@@ -404,6 +404,112 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 4b. Create Call Recording via REST API (/api/recordings/start)
+  // Ref: https://www.twilio.com/docs/voice/api/recording#create-a-recording
+  if ((cleanPath === '/api/recordings/start' || cleanPath === '/recordings/start') && req.method === 'POST') {
+    let bodyText = '';
+    req.on('data', chunk => { bodyText += chunk; });
+    req.on('end', async () => {
+      try {
+        const body = JSON.parse(bodyText || '{}');
+        const callSid = (body.callSid || '').trim();
+        const accountSid = process.env.TWILIO_ACCOUNT_SID;
+        const authToken = process.env.TWILIO_AUTH_TOKEN;
+        const host = req.headers.host || 'arbre-ai-bridge.onrender.com';
+        const recordingCallbackUrl = `https://${host}/twiml/recording-status`;
+
+        if (!callSid) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: 'callSid parameter is required.' }));
+          return;
+        }
+
+        if (!accountSid || !authToken) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: 'TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN not configured.' }));
+          return;
+        }
+
+        const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+        const params = new URLSearchParams();
+        params.append('RecordingChannels', 'dual');
+        params.append('RecordingStatusCallback', recordingCallbackUrl);
+
+        const twilioRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${callSid}/Recordings.json`, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: params.toString()
+        });
+
+        const data = await twilioRes.json();
+        if (twilioRes.ok) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            recordingSid: data.sid,
+            callSid: data.call_sid,
+            status: data.status,
+            message: `Recording started successfully for Call ${callSid}!`
+          }));
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: data.message || 'Twilio REST API error starting recording.' }));
+        }
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: err.message }));
+      }
+    });
+    return;
+  }
+
+  // 5. Fetch Real Twilio Calls Log API (/api/calls)
+  if ((cleanPath === '/api/calls' || cleanPath === '/calls') && req.method === 'GET') {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+    if (!accountSid || !authToken) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: false,
+        message: 'TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be configured in Render environment variables.'
+      }));
+      return;
+    }
+
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+      const twilioRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls.json?PageSize=25`, {
+        headers: { 'Authorization': authHeader }
+      });
+
+      const data = await twilioRes.json();
+      const calls = (data.calls || []).map(c => ({
+        id: c.sid,
+        callSid: c.sid,
+        customerName: c.direction === 'inbound' ? c.from : c.to,
+        phoneNumber: c.direction === 'inbound' ? c.from : c.to,
+        direction: c.direction === 'inbound' ? 'Inbound' : 'Outbound',
+        status: c.status === 'in-progress' ? 'In-Progress' : (c.status === 'completed' ? 'Completed' : c.status),
+        streamUrl: `wss://${req.headers.host || 'arbre-ai-bridge.onrender.com'}/media`,
+        startTime: c.date_created ? new Date(c.date_created).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now',
+        duration: c.duration ? `${c.duration}s` : 'Active',
+        topic: 'AI Voice Conversation',
+        transcriptSample: 'Twilio Media Stream AI live session'
+      }));
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: calls.length, calls }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, message: err.message }));
+    }
+    return;
+  }
+
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ success: false, message: `Endpoint ${urlPath} not found on Arbre AI Bridge.` }));
 });
