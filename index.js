@@ -113,6 +113,7 @@ Guidelines:
 let agentTrainingConfig = {
   selectedVoice: 'Aoede',
   personaTone: 'Professional & Consultative',
+  customGreeting: 'Hello! Welcome to Arbre IT Solutions. Assalamu Alaikum! Main aap ki kya madad kar sakta hoon?',
   systemPrompt: BASE_ARBRE_PROMPT,
   faqs: [
     { id: 'f1', category: 'IT Support', question: 'What are your monthly IT support packages?', answer: 'Our managed IT packages start at PKR 5,000/month for small offices and scale up based on workstations, servers, and SLA guarantees.' },
@@ -633,11 +634,12 @@ const server = http.createServer(async (req, res) => {
         const body = JSON.parse(bodyText || '{}');
         if (body.selectedVoice) agentTrainingConfig.selectedVoice = body.selectedVoice;
         if (body.personaTone) agentTrainingConfig.personaTone = body.personaTone;
+        if (body.customGreeting !== undefined) agentTrainingConfig.customGreeting = body.customGreeting;
         if (body.systemPrompt) agentTrainingConfig.systemPrompt = body.systemPrompt;
         if (Array.isArray(body.faqs)) agentTrainingConfig.faqs = body.faqs;
         if (Array.isArray(body.objections)) agentTrainingConfig.objections = body.objections;
 
-        console.log(`[ArbreBridge] 🎓 AGENT TRAINING UPDATED! Voice: ${agentTrainingConfig.selectedVoice}, FAQs: ${agentTrainingConfig.faqs.length}, Objections: ${agentTrainingConfig.objections.length}`);
+        console.log(`[ArbreBridge] 🎓 AGENT TRAINING UPDATED! Voice: ${agentTrainingConfig.selectedVoice}, Greeting: "${agentTrainingConfig.customGreeting?.slice(0, 30)}...", FAQs: ${agentTrainingConfig.faqs.length}, Objections: ${agentTrainingConfig.objections.length}`);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -669,6 +671,7 @@ wss.on('connection', async (ws, req) => {
   let callSid = null;
   let streamCustomerName = 'Valued Customer';
   let streamTopic = 'General IT Support Inquiry';
+  let streamCustomScript = '';
   let geminiWs = null;        // Raw WebSocket to Gemini
   let isGeminiReady = false;
   let hasSentGreeting = false;
@@ -684,12 +687,22 @@ wss.on('connection', async (ws, req) => {
   const triggerGreetingIfReady = () => {
     if (!isGeminiReady || hasSentGreeting || !streamSid) return;
     hasSentGreeting = true;
-    console.log(`[ArbreBridge] 📢 Sending bilingual greeting prompt to Gemini (Call: ${callSid})`);
+
+    let greetingText = '';
+    if (streamCustomScript && streamCustomScript.trim()) {
+      greetingText = `A customer has connected to the call. Start the call immediately by saying: "${streamCustomScript.replace('{Name}', streamCustomerName)}"`;
+    } else if (agentTrainingConfig.customGreeting && agentTrainingConfig.customGreeting.trim()) {
+      greetingText = `A customer has connected to the call. Greet them immediately using this greeting: "${agentTrainingConfig.customGreeting.trim()}"`;
+    } else {
+      greetingText = `A customer has connected to the call. Greet them warmly in a short response according to your system instructions.`;
+    }
+
+    console.log(`[ArbreBridge] 📢 Sending dynamic initial greeting to Gemini: ${greetingText.slice(0, 80)}...`);
     sendToGemini({
       clientContent: {
         turns: [{
           role: 'user',
-          parts: [{ text: 'A customer has connected to the call. Greet them immediately in a warm bilingual voice: "Hello! Welcome to Arbre IT Solutions. Assalamu Alaikum! Main aap ki kya madad kar sakta hoon?"' }]
+          parts: [{ text: greetingText }]
         }],
         turnComplete: true
       }
