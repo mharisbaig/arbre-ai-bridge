@@ -282,7 +282,6 @@ const server = http.createServer(async (req, res) => {
   <Start>
     <Recording channels="dual" recordingStatusCallback="${recordingCallbackUrl}" />
   </Start>
-  <Say voice="Polly.Joanna">Welcome to Arbre IT Solutions. Connecting your call to our AI voice assistant stream.</Say>
   <Connect>
     <Stream url="${streamUrl}">
       <Parameter name="company" value="Arbre IT Solutions" />
@@ -354,7 +353,6 @@ const server = http.createServer(async (req, res) => {
   <Start>
     <Recording channels="dual" recordingStatusCallback="${recordingCallbackUrl}" />
   </Start>
-  <Say voice="Polly.Joanna">Hello ${customerName}. Connecting your call to Arbre IT Solutions AI voice assistant.</Say>
   <Connect>
     <Stream url="${streamUrl}">
       <Parameter name="customerName" value="${customerName}" />
