@@ -386,17 +386,65 @@ const server = http.createServer(async (req, res) => {
       });
 
       const data = await twilioRes.json();
+      const host = req.headers.host || 'arbre-ai-bridge.onrender.com';
       const recordings = (data.recordings || []).map(r => ({
         id: r.sid,
         recordingSid: r.sid,
         callSid: r.call_sid,
         duration: (r.duration || '0') + 's',
         dateCreated: r.date_created,
-        mediaUrl: `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${r.sid}.mp3`,
+        mediaUrl: `https://${host}/api/recording-audio?sid=${r.sid}`,
       }));
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, count: recordings.length, recordings }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, message: err.message }));
+    }
+    return;
+  }
+
+  // 4b. Proxy Audio Streaming Endpoint (/api/recording-audio)
+  // Bypasses Twilio HTTP Basic Auth browser prompt by proxying MP3 stream securely
+  if ((cleanPath === '/api/recording-audio' || cleanPath === '/recording-audio') && req.method === 'GET') {
+    const parsedUrl = new URL(req.url, `https://${req.headers.host || 'arbre-ai-bridge.onrender.com'}`);
+    const recordingSid = parsedUrl.searchParams.get('sid');
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+    if (!recordingSid) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, message: 'sid parameter is required.' }));
+      return;
+    }
+
+    if (!accountSid || !authToken) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, message: 'Twilio credentials not configured in environment variables.' }));
+      return;
+    }
+
+    try {
+      const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+      const mp3Url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${recordingSid}.mp3`;
+      const twilioRes = await fetch(mp3Url, {
+        headers: { 'Authorization': authHeader }
+      });
+
+      if (!twilioRes.ok) {
+        res.writeHead(twilioRes.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: 'Twilio audio fetch failed.' }));
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Cache-Control': 'public, max-age=3600'
+      });
+
+      const arrayBuffer = await twilioRes.arrayBuffer();
+      res.end(Buffer.from(arrayBuffer));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, message: err.message }));
