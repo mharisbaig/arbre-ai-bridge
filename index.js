@@ -428,17 +428,34 @@ const server = http.createServer(async (req, res) => {
     try {
       const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
       const mp3Url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${recordingSid}.mp3`;
-      const twilioRes = await fetch(mp3Url, {
-        headers: { 'Authorization': authHeader }
+      
+      // Step 1: Request Twilio with manual redirect to capture S3 signed URL
+      let twilioRes = await fetch(mp3Url, {
+        method: 'GET',
+        headers: { 'Authorization': authHeader },
+        redirect: 'manual'
       });
 
-      if (!twilioRes.ok) {
-        res.writeHead(twilioRes.status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, message: 'Twilio audio fetch failed.' }));
+      let finalAudioRes = twilioRes;
+
+      // Step 2: Follow 302 redirect to Amazon S3 WITHOUT sending Twilio Basic Auth header
+      if (twilioRes.status >= 300 && twilioRes.status < 400) {
+        const redirectUrl = twilioRes.headers.get('location');
+        if (redirectUrl) {
+          console.log(`[ArbreBridge] 🎧 Following Twilio S3 audio redirect: ${redirectUrl.slice(0, 80)}...`);
+          finalAudioRes = await fetch(redirectUrl);
+        }
+      }
+
+      if (!finalAudioRes.ok) {
+        console.error(`[ArbreBridge] ❌ S3 audio fetch failed with status ${finalAudioRes.status}`);
+        res.writeHead(finalAudioRes.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: `Audio fetch failed (${finalAudioRes.status})` }));
         return;
       }
 
-      const buffer = Buffer.from(await twilioRes.arrayBuffer());
+      const buffer = Buffer.from(await finalAudioRes.arrayBuffer());
+      console.log(`[ArbreBridge] 🎵 Streaming ${buffer.length} bytes of MP3 audio for Recording ${recordingSid}`);
       res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
         'Content-Length': buffer.length,
@@ -449,6 +466,7 @@ const server = http.createServer(async (req, res) => {
       });
       res.end(buffer);
     } catch (err) {
+      console.error('[ArbreBridge] Audio proxy error:', err.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, message: err.message }));
     }
