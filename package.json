@@ -1,0 +1,28 @@
+{
+  "name": "arbre-ai-bridge",
+  "version": "1.0.0",
+  "description": "Arbre IT Solutions — Gemini Live API WebSocket bridge for Twilio Media Streams",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^0.7.0",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  },
+  "keywords": [
+    "twilio",
+    "gemini",
+    "websocket",
+    "ai",
+    "voice"
+  ],
+  "author": "Arbre IT Solutions",
+  "license": "MIT"
+}

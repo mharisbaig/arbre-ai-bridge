@@ -1,0 +1,23 @@
+# Render.com deployment configuration for Arbre AI Bridge
+# Docs: https://render.com/docs/yaml-spec
+
+services:
+  - type: web
+    name: arbre-ai-bridge
+    runtime: node
+    plan: free              # Upgrade to "starter" ($7/mo) to avoid cold starts
+    region: oregon          # Change to: frankfurt, singapore, ohio, virginia
+    buildCommand: npm install
+    startCommand: node index.js
+
+    # Health check endpoint (keeps the service alive on paid plans)
+    healthCheckPath: /health
+
+    # Environment variables — set these in Render Dashboard > Environment
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false         # Must be set manually in Render Dashboard
+      - key: GEMINI_MODEL
+        value: gemini-live-2.5-flash-preview
