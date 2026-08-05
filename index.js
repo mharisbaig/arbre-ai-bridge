@@ -350,11 +350,12 @@ wss.on('connection', async (ws, req) => {
     });
   });
 
+  let audioChunkCount = 0;
+
   geminiWs.on('message', (rawData) => {
     try {
       const msg = JSON.parse(rawData.toString());
       const keys = Object.keys(msg).join(', ');
-      console.log(`[ArbreBridge] Gemini msg: ${keys}`);
 
       // Setup complete — session is ready
       if (msg.setupComplete !== undefined) {
@@ -364,22 +365,36 @@ wss.on('connection', async (ws, req) => {
         return;
       }
 
-      // Collect audio parts from all known response structures
+      // Check for user interruption signal
+      if (msg.serverContent?.interrupted) {
+        console.log('[ArbreBridge] ⚡ Gemini detected user barge-in / interruption');
+      }
+
+      // Collect audio parts & text from all known response structures
       const audioParts = [];
+      const textParts = [];
 
       // Structure A: serverContent.modelTurn.parts
       for (const part of (msg.serverContent?.modelTurn?.parts || [])) {
         if (part.inlineData?.data) audioParts.push(part.inlineData);
+        if (part.text) textParts.push(part.text);
       }
       // Structure B: candidates[0].content.parts
       for (const cand of (msg.candidates || [])) {
         for (const part of (cand.content?.parts || [])) {
           if (part.inlineData?.data) audioParts.push(part.inlineData);
+          if (part.text) textParts.push(part.text);
         }
+      }
+
+      if (textParts.length > 0) {
+        console.log(`[ArbreBridge] 💬 Gemini text: "${textParts.join(' ')}"`);
       }
 
       if (audioParts.length > 0) {
         console.log(`[ArbreBridge] 🔊 ${audioParts.length} audio part(s) from Gemini → forwarding to Twilio`);
+      } else if (textParts.length === 0 && !msg.serverContent?.turnComplete) {
+        console.log(`[ArbreBridge] Gemini msg: ${keys}`);
       }
 
       for (const inlineData of audioParts) {
@@ -402,7 +417,7 @@ wss.on('connection', async (ws, req) => {
       }
 
       if (msg.serverContent?.turnComplete) {
-        console.log('[ArbreBridge] Gemini turn complete');
+        console.log('[ArbreBridge] ✅ Gemini model turn complete');
       }
     } catch (err) {
       console.error('[ArbreBridge] Error processing Gemini message:', err.message);
@@ -441,6 +456,12 @@ wss.on('connection', async (ws, req) => {
           const pcm8Buffer = mulawBufferToPCM16(mulawBuffer);
           const pcm16Buffer = upsample8to16kHz(pcm8Buffer);
           const base64Audio = pcm16Buffer.toString('base64');
+          
+          audioChunkCount++;
+          if (audioChunkCount % 50 === 0) {
+            console.log(`[ArbreBridge] 🎙️ Forwarded ${audioChunkCount} audio chunks from user to Gemini`);
+          }
+
           sendToGemini({
             realtimeInput: {
               audio: {
