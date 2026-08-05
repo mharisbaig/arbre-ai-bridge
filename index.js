@@ -78,7 +78,7 @@ async function hangupTwilioCall(callSid) {
 
 // ─── Arbre IT Solutions System Prompt ─────────────────────────────────────────
 
-const ARBRE_SYSTEM_PROMPT = `You are Arbre, a professional, bilingual AI voice assistant for Arbre IT Solutions, 
+const BASE_ARBRE_PROMPT = `You are Arbre, a professional, bilingual AI voice assistant for Arbre IT Solutions, 
 a leading IT services provider based in Karachi, Pakistan.
 
 CRITICAL VOICE & INTERRUPTION RULES:
@@ -107,6 +107,44 @@ Guidelines:
 - Address: G-17 Friends Shopping Mall, Korangi 5, Karachi, Pakistan.
 - Always offer to connect the caller with a human specialist (Haris Baig) if needed.
 - IMPORTANT CALL DROP RULE: When concluding the call or after saying goodbye ("Goodbye!", "Allah Hafiz!", "Shukriya!", "Have a great day!"), end your text message with "[GOODBYE]".`;
+
+// ─── Dynamic Agent Training & Knowledge Base Storage ──────────────────────────
+
+let agentTrainingConfig = {
+  selectedVoice: 'Aoede',
+  personaTone: 'Professional & Consultative',
+  systemPrompt: BASE_ARBRE_PROMPT,
+  faqs: [
+    { id: 'f1', category: 'IT Support', question: 'What are your monthly IT support packages?', answer: 'Our managed IT packages start at PKR 5,000/month for small offices and scale up based on workstations, servers, and SLA guarantees.' },
+    { id: 'f2', category: 'IP Telephony', question: 'Do you configure Zycoo and Yealink PABX?', answer: 'Yes, we supply, install, and program Zycoo IP-PBX appliances and Yealink SIP phones with IVR menus, extension routing, and call recording.' },
+    { id: 'f3', category: 'Surveillance', question: 'Do you offer solar-powered CCTV setups?', answer: 'Yes, we specialize in solar-powered off-grid CCTV surveillance systems with 4G SIM connectivity for remote sites and industrial locations.' }
+  ],
+  objections: [
+    { id: 'o1', trigger: 'We already have an internal IT guy', strategy: 'Highlight specialized backup support & escalation', recommendedResponse: 'We respect that! We complement internal IT teams by handling 24/7 server monitoring, firewall audits, and emergency backup so your IT staff can focus on core projects.' },
+    { id: 'o2', trigger: 'Your prices seem high', strategy: 'Emphasize ROI & prevented downtime costs', recommendedResponse: 'Our packages are custom-tailored to avoid server downtime, which usually costs far more than our monthly PKR 5,000 starter tier.' }
+  ]
+};
+
+// Function to assemble complete dynamic instruction for Gemini Live session
+function buildFullSystemInstruction(topic, customerName) {
+  let prompt = agentTrainingConfig.systemPrompt || BASE_ARBRE_PROMPT;
+
+  if (customerName || topic) {
+    prompt += `\n\nCALL CONTEXT:\n- Customer Name: ${customerName || 'Valued Customer'}\n- Primary Inquiry / Campaign Topic: ${topic || 'General IT Support'}`;
+  }
+
+  if (agentTrainingConfig.faqs && agentTrainingConfig.faqs.length > 0) {
+    prompt += `\n\nKNOWLEDGE BASE FAQS (Use these exact facts when answered):\n` +
+      agentTrainingConfig.faqs.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n\n');
+  }
+
+  if (agentTrainingConfig.objections && agentTrainingConfig.objections.length > 0) {
+    prompt += `\n\nOBJECTION HANDLING STRATEGIES (When customer expresses hesitancy):\n` +
+      agentTrainingConfig.objections.map(o => `If customer says: "${o.trigger}" -> Strategy: ${o.strategy}. Response: "${o.recommendedResponse}"`).join('\n\n');
+  }
+
+  return prompt;
+}
 
 // ─── Audio Codec Helpers (μ-law ↔ PCM) ───────────────────────────────────────
 
@@ -579,6 +617,42 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 6. Fetch Active Agent Training & Knowledge Base Config (/api/training)
+  if ((cleanPath === '/api/training' || cleanPath === '/training') && (req.method === 'GET' || req.method === 'HEAD')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, config: agentTrainingConfig }));
+    return;
+  }
+
+  // 7. Update Agent Training & Knowledge Base Config (/api/training/update)
+  if ((cleanPath === '/api/training/update' || cleanPath === '/training/update') && req.method === 'POST') {
+    let bodyText = '';
+    req.on('data', chunk => { bodyText += chunk; });
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(bodyText || '{}');
+        if (body.selectedVoice) agentTrainingConfig.selectedVoice = body.selectedVoice;
+        if (body.personaTone) agentTrainingConfig.personaTone = body.personaTone;
+        if (body.systemPrompt) agentTrainingConfig.systemPrompt = body.systemPrompt;
+        if (Array.isArray(body.faqs)) agentTrainingConfig.faqs = body.faqs;
+        if (Array.isArray(body.objections)) agentTrainingConfig.objections = body.objections;
+
+        console.log(`[ArbreBridge] 🎓 AGENT TRAINING UPDATED! Voice: ${agentTrainingConfig.selectedVoice}, FAQs: ${agentTrainingConfig.faqs.length}, Objections: ${agentTrainingConfig.objections.length}`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          message: 'AI Agent Training & Knowledge Base updated live on Render bridge server!',
+          config: agentTrainingConfig
+        }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: err.message }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ success: false, message: `Endpoint ${urlPath} not found on Arbre AI Bridge.` }));
 });
@@ -593,6 +667,8 @@ wss.on('connection', async (ws, req) => {
 
   let streamSid = null;
   let callSid = null;
+  let streamCustomerName = 'Valued Customer';
+  let streamTopic = 'General IT Support Inquiry';
   let geminiWs = null;        // Raw WebSocket to Gemini
   let isGeminiReady = false;
   let hasSentGreeting = false;
@@ -625,7 +701,10 @@ wss.on('connection', async (ws, req) => {
   geminiWs = new WebSocket(geminiUrl);
 
   geminiWs.on('open', () => {
-    console.log(`[ArbreBridge] ✅ Gemini WS open — sending setup (model: ${GEMINI_MODEL})`);
+    console.log(`[ArbreBridge] ✅ Gemini WS open — sending setup (model: ${GEMINI_MODEL}, voice: ${agentTrainingConfig.selectedVoice})`);
+    
+    const dynamicInstructions = buildFullSystemInstruction(streamTopic, streamCustomerName);
+
     // Send setup message — must be first message
     sendToGemini({
       setup: {
@@ -633,11 +712,11 @@ wss.on('connection', async (ws, req) => {
         generationConfig: {
           responseModalities: ['AUDIO'],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: agentTrainingConfig.selectedVoice || 'Aoede' } }
           }
         },
         systemInstruction: {
-          parts: [{ text: ARBRE_SYSTEM_PROMPT }]
+          parts: [{ text: dynamicInstructions }]
         }
       }
     });
