@@ -20,8 +20,7 @@ config();
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const rawModel = process.env.GEMINI_MODEL || '';
-const GEMINI_MODEL = (rawModel && !rawModel.includes('2.5')) ? rawModel : 'gemini-2.0-flash-exp';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
 
 if (!GEMINI_API_KEY) {
   console.error('[ArbreBridge] FATAL: GEMINI_API_KEY environment variable is required.');
@@ -329,35 +328,58 @@ wss.on('connection', async (ws, req) => {
 
         onmessage: async (message) => {
           try {
-            // Process audio parts from Gemini's response
+            console.log('[ArbreBridge] Gemini msg keys:', Object.keys(message || {}).join(', '));
+
+            // Collect inlineData parts from all possible response structures
+            const audioParts = [];
+
+            // Structure 1: serverContent.modelTurn.parts
             const parts = message.serverContent?.modelTurn?.parts || [];
             for (const part of parts) {
-              if (part.inlineData?.data) {
-                const mimeType = part.inlineData.mimeType || '';
-                const rawPCM = Buffer.from(part.inlineData.data, 'base64');
+              if (part.inlineData?.data) audioParts.push(part.inlineData);
+            }
 
-                let pcm8Buffer;
-                if (mimeType.includes('rate=24000') || mimeType.includes('24000')) {
-                  pcm8Buffer = downsample24to8kHz(rawPCM);
-                } else if (mimeType.includes('rate=16000') || mimeType.includes('16000')) {
-                  const outSamples = Math.floor(rawPCM.length / 4);
-                  pcm8Buffer = Buffer.alloc(outSamples * 2);
-                  for (let i = 0; i < outSamples; i++) {
-                    pcm8Buffer.writeInt16LE(rawPCM.readInt16LE(i * 4), i * 2);
-                  }
-                } else {
-                  pcm8Buffer = downsample24to8kHz(rawPCM);
+            // Structure 2: candidates[0].content.parts
+            const candidates = message.candidates || [];
+            for (const candidate of candidates) {
+              for (const part of (candidate.content?.parts || [])) {
+                if (part.inlineData?.data) audioParts.push(part.inlineData);
+              }
+            }
+
+            // Structure 3: data field directly
+            if (message.data) {
+              audioParts.push({ data: message.data, mimeType: 'audio/pcm;rate=24000' });
+            }
+
+            if (audioParts.length > 0) {
+              console.log(`[ArbreBridge] Received ${audioParts.length} audio part(s) from Gemini`);
+            }
+
+            for (const inlineData of audioParts) {
+              const mimeType = inlineData.mimeType || '';
+              const rawPCM = Buffer.from(inlineData.data, 'base64');
+
+              let pcm8Buffer;
+              if (mimeType.includes('16000')) {
+                const outSamples = Math.floor(rawPCM.length / 4);
+                pcm8Buffer = Buffer.alloc(outSamples * 2);
+                for (let i = 0; i < outSamples; i++) {
+                  pcm8Buffer.writeInt16LE(rawPCM.readInt16LE(i * 4), i * 2);
                 }
+              } else {
+                // Default: assume 24kHz
+                pcm8Buffer = downsample24to8kHz(rawPCM);
+              }
 
-                const mulawBuffer = pcm16ToMulawBuffer(pcm8Buffer);
+              const mulawBuffer = pcm16ToMulawBuffer(pcm8Buffer);
 
-                if (ws.readyState === ws.OPEN && streamSid) {
-                  ws.send(JSON.stringify({
-                    event: 'media',
-                    streamSid,
-                    media: { payload: mulawBuffer.toString('base64') }
-                  }));
-                }
+              if (ws.readyState === ws.OPEN && streamSid) {
+                ws.send(JSON.stringify({
+                  event: 'media',
+                  streamSid,
+                  media: { payload: mulawBuffer.toString('base64') }
+                }));
               }
             }
 
@@ -365,7 +387,7 @@ wss.on('connection', async (ws, req) => {
               console.log(`[ArbreBridge] Gemini turn complete (call: ${callSid})`);
             }
           } catch (err) {
-            console.error('[ArbreBridge] Error sending Gemini audio to Twilio:', err.message);
+            console.error('[ArbreBridge] Error processing Gemini message:', err.message, err.stack);
           }
         },
 
@@ -426,21 +448,13 @@ wss.on('connection', async (ws, req) => {
 
             const base64Audio = pcm16Buffer.toString('base64');
 
-            if (typeof geminiSession.sendRealtimeInput === 'function') {
-              geminiSession.sendRealtimeInput([{
+            // Correct API: sendRealtimeInput({ media: { mimeType, data } })
+            geminiSession.sendRealtimeInput({
+              media: {
                 mimeType: 'audio/pcm;rate=16000',
                 data: base64Audio
-              }]);
-            } else if (typeof geminiSession.send === 'function') {
-              geminiSession.send({
-                realtimeInput: {
-                  mediaChunks: [{
-                    mimeType: 'audio/pcm;rate=16000',
-                    data: base64Audio
-                  }]
-                }
-              });
-            }
+              }
+            });
           } catch (e) {
             console.warn('[ArbreBridge] Error forwarding audio to Gemini:', e.message);
           }
