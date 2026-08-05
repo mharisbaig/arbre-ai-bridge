@@ -443,7 +443,10 @@ wss.on('connection', async (ws, req) => {
           const base64Audio = pcm16Buffer.toString('base64');
           sendToGemini({
             realtimeInput: {
-              mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64Audio }]
+              audio: {
+                data: base64Audio,
+                mimeType: 'audio/pcm;rate=16000'
+              }
             }
           });
           break;
