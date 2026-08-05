@@ -20,7 +20,11 @@ config();
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
+
+// Supported Live API model (gemini-live-* names are not valid — they cause WebSocket 1008 close)
+const VALID_LIVE_MODELS = ['gemini-2.0-flash-exp', 'gemini-2.0-flash-live-001'];
+const _envModel = process.env.GEMINI_MODEL || '';
+const GEMINI_MODEL = VALID_LIVE_MODELS.includes(_envModel) ? _envModel : 'gemini-2.0-flash-exp';
 
 if (!GEMINI_API_KEY) {
   console.error('[ArbreBridge] FATAL: GEMINI_API_KEY environment variable is required.');
