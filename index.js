@@ -293,6 +293,27 @@ wss.on('connection', async (ws, req) => {
   let callSid = null;
   let geminiSession = null;
   let isGeminiReady = false;
+  let hasSentGreeting = false;
+
+  // Helper to trigger Gemini greeting as soon as session and stream are ready
+  const triggerGreetingIfReady = () => {
+    if (!geminiSession || !isGeminiReady || hasSentGreeting || !streamSid) return;
+    hasSentGreeting = true;
+    console.log(`[ArbreBridge] 📢 Triggering initial Gemini AI greeting prompt (Call: ${callSid}, Stream: ${streamSid})`);
+    try {
+      geminiSession.sendClientContent({
+        turns: [{
+          role: 'user',
+          parts: [{
+            text: 'A customer has just connected to the phone call. Please speak out loud immediately to greet them warmly: "Hello! Thank you for calling Arbre IT Solutions. My name is Arbre, your AI assistant. How can I help you today?"'
+          }]
+        }],
+        turnComplete: true
+      });
+    } catch (e) {
+      console.warn('[ArbreBridge] Could not send greeting prompt:', e.message);
+    }
+  };
 
   // ── Initialize Gemini Live Session ──────────────────────────────────────────
   try {
@@ -302,6 +323,7 @@ wss.on('connection', async (ws, req) => {
         onopen: () => {
           isGeminiReady = true;
           console.log(`[ArbreBridge] ✅ Gemini Live session open (call: ${callSid})`);
+          triggerGreetingIfReady();
         },
 
         onmessage: async (message) => {
@@ -315,17 +337,14 @@ wss.on('connection', async (ws, req) => {
 
                 let pcm8Buffer;
                 if (mimeType.includes('rate=24000') || mimeType.includes('24000')) {
-                  // Gemini default: 24kHz → downsample to 8kHz
                   pcm8Buffer = downsample24to8kHz(rawPCM);
                 } else if (mimeType.includes('rate=16000') || mimeType.includes('16000')) {
-                  // 16kHz → downsample to 8kHz (take every other sample)
                   const outSamples = Math.floor(rawPCM.length / 4);
                   pcm8Buffer = Buffer.alloc(outSamples * 2);
                   for (let i = 0; i < outSamples; i++) {
                     pcm8Buffer.writeInt16LE(rawPCM.readInt16LE(i * 4), i * 2);
                   }
                 } else {
-                  // Assume 24kHz if unspecified (Gemini default)
                   pcm8Buffer = downsample24to8kHz(rawPCM);
                 }
 
@@ -366,13 +385,13 @@ wss.on('connection', async (ws, req) => {
         },
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Aoede' } // Available: Puck, Charon, Kore, Fenrir, Aoede
+            prebuiltVoiceConfig: { voiceName: 'Aoede' }
           }
         }
       }
     });
 
-    console.log('[ArbreBridge] Gemini Live session initialized');
+    console.log('[ArbreBridge] Gemini Live session initialization started');
   } catch (err) {
     console.error('[ArbreBridge] FATAL: Failed to initialize Gemini Live session:', err.message);
     ws.close(1011, 'Gemini initialization failed');
@@ -385,59 +404,47 @@ wss.on('connection', async (ws, req) => {
       const data = JSON.parse(rawMessage.toString());
 
       switch (data.event) {
-        // ── Twilio connected ─────────────────────────────────────────────────
         case 'connected':
           console.log('[ArbreBridge] Twilio signaled: connected');
           break;
 
-        // ── Stream started: send greeting ────────────────────────────────────
         case 'start':
           streamSid = data.streamSid;
           callSid = data.start?.callSid || 'unknown';
           console.log(`[ArbreBridge] Stream started — SID: ${streamSid}, Call: ${callSid}`);
-
-          // Prompt Gemini to greet the caller
-          if (geminiSession && isGeminiReady) {
-            try {
-              geminiSession.sendClientContent({
-                turns: [{
-                  role: 'user',
-                  parts: [{
-                    text: 'A customer has just connected to the call. Please greet them warmly, introduce yourself as the Arbre IT Solutions AI assistant, and ask how you can help them today.'
-                  }]
-                }],
-                turnComplete: true
-              });
-            } catch (e) {
-              console.warn('[ArbreBridge] Could not send greeting prompt:', e.message);
-            }
-          }
+          triggerGreetingIfReady();
           break;
 
-        // ── Inbound audio from caller → forward to Gemini ───────────────────
         case 'media':
           if (!data.media?.payload || !geminiSession || !isGeminiReady) break;
 
           try {
-            // Twilio sends: base64 μ-law 8kHz audio
             const mulawBuffer = Buffer.from(data.media.payload, 'base64');
-            // Step 1: μ-law → PCM 16-bit 8kHz
             const pcm8Buffer = mulawBufferToPCM16(mulawBuffer);
-            // Step 2: 8kHz → 16kHz (Gemini requirement)
             const pcm16Buffer = upsample8to16kHz(pcm8Buffer);
 
-            geminiSession.sendRealtimeInput({
-              audio: {
-                data: pcm16Buffer.toString('base64'),
-                mimeType: 'audio/pcm;rate=16000'
-              }
-            });
+            const base64Audio = pcm16Buffer.toString('base64');
+
+            if (typeof geminiSession.sendRealtimeInput === 'function') {
+              geminiSession.sendRealtimeInput([{
+                mimeType: 'audio/pcm;rate=16000',
+                data: base64Audio
+              }]);
+            } else if (typeof geminiSession.send === 'function') {
+              geminiSession.send({
+                realtimeInput: {
+                  mediaChunks: [{
+                    mimeType: 'audio/pcm;rate=16000',
+                    data: base64Audio
+                  }]
+                }
+              });
+            }
           } catch (e) {
             console.warn('[ArbreBridge] Error forwarding audio to Gemini:', e.message);
           }
           break;
 
-        // ── Call ended ───────────────────────────────────────────────────────
         case 'stop':
           console.log(`[ArbreBridge] Stream stopped — SID: ${streamSid}`);
           if (geminiSession) {
