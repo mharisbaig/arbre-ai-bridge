@@ -363,8 +363,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  const cleanPath = urlPath.replace(/\/$/, '') || '/';
+
   // 4. Fetch Live Call Recordings API (/api/recordings)
-  if (urlPath === '/api/recordings' && req.method === 'GET') {
+  if ((cleanPath === '/api/recordings' || cleanPath === '/recordings') && req.method === 'GET') {
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
     const authToken = process.env.TWILIO_AUTH_TOKEN;
 
@@ -402,8 +404,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(404);
-  res.end('Not Found');
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ success: false, message: `Endpoint ${urlPath} not found on Arbre AI Bridge.` }));
 });
 
 // ─── WebSocket Server at /media (Twilio Media Streams endpoint) ───────────────
