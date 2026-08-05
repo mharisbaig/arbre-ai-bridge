@@ -366,7 +366,7 @@ const server = http.createServer(async (req, res) => {
   const cleanPath = urlPath.replace(/\/$/, '') || '/';
 
   // 4. Fetch Live Call Recordings API (/api/recordings)
-  if ((cleanPath === '/api/recordings' || cleanPath === '/recordings') && req.method === 'GET') {
+  if ((cleanPath === '/api/recordings' || cleanPath === '/recordings') && (req.method === 'GET' || req.method === 'HEAD')) {
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
     const authToken = process.env.TWILIO_AUTH_TOKEN;
 
@@ -407,7 +407,7 @@ const server = http.createServer(async (req, res) => {
 
   // 4b. Proxy Audio Streaming Endpoint (/api/recording-audio)
   // Bypasses Twilio HTTP Basic Auth browser prompt by proxying MP3 stream securely
-  if ((cleanPath === '/api/recording-audio' || cleanPath === '/recording-audio') && req.method === 'GET') {
+  if ((cleanPath === '/api/recording-audio' || cleanPath === '/recording-audio') && (req.method === 'GET' || req.method === 'HEAD')) {
     const parsedUrl = new URL(req.url, `https://${req.headers.host || 'arbre-ai-bridge.onrender.com'}`);
     const recordingSid = parsedUrl.searchParams.get('sid');
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
